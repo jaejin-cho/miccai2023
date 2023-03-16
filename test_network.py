@@ -39,6 +39,10 @@ num_filter              =   46
 ##########################################################
 
 print('loading data')
+
+if os.path.exists(data_name)==False:
+    os.system("wget -O " + data_name + " https://www.dropbox.com/s/2rteu3vmtbj15kx/example.mat?dl=1")
+    
 dt      =   mf.load_h5py(data_name)
 csm     =   np.expand_dims(np.transpose(dt['csm']['real'] + 1j*dt['csm']['imag'],(2,0,1)),axis=0)
 kspace  =   np.transpose(dt['kspace']['real'] + 1j*dt['kspace']['imag'],(4,2,0,1,3))
