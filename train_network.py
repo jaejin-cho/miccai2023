@@ -158,7 +158,7 @@ model_callback = ModelCheckpoint(   model_name,
 
 model_EarlyStop = EarlyStopping(    monitor                 =   "val_loss",
                                     min_delta               =   0,
-                                    patience                =   5,
+                                    patience                =   10,
                                     verbose                 =   1,
                                     mode                    =   "auto",
                                     baseline                =   None,
