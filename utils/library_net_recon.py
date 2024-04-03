@@ -23,8 +23,8 @@ from library_net_function import *
 class Aclass:
     def __init__(self, csm,mask,lam):
         with tf.name_scope('Ainit'):
-            self.mask       =       mask
-            self.csm        =       csm
+            self.mask       =       r2c(mask)
+            self.csm        =       r2c(csm)
             self.lam        =       lam
             self.nx, self.ny    =   csm.shape[1:3]
     def myAtA(self,img):
@@ -44,11 +44,13 @@ def myCG(A,rhs):
     def body(i,rTr,x,r,p):
         with tf.name_scope('cgBody'):
             Ap      =   A.myAtA(p)
-            alpha   =   rTr / tf.cast(tf.reduce_sum(tf.math.conj(p)*Ap),dtype=tf.float32)
+            # alpha   =   rTr / tf.cast(tf.reduce_sum(tf.math.conj(p)*Ap),dtype=tf.float32)
+            alpha   =   rTr / tf.math.real(tf.reduce_sum(tf.math.conj(p)*Ap))
             alpha   =   tf.complex(alpha,0.)
             x       =   x + alpha * p
             r       =   r - alpha * Ap
-            rTrNew  =   tf.cast( tf.reduce_sum(tf.math.conj(r)*r),dtype=tf.float32)
+            # rTrNew  =   tf.cast( tf.reduce_sum(tf.math.conj(r)*r),dtype=tf.float32)
+            rTrNew  =   tf.math.real( tf.reduce_sum(tf.math.conj(r)*r))
             beta    =   rTrNew / rTr
             beta    =   tf.complex(beta,0.)
             p       =   r + beta * p
@@ -56,7 +58,8 @@ def myCG(A,rhs):
 
     x       =   tf.zeros_like(rhs)
     i,r,p   =   0,rhs,rhs
-    rTr     =   tf.cast( tf.reduce_sum(tf.math.conj(r)*r),dtype=tf.float32)
+    # rTr     =   tf.cast( tf.reduce_sum(tf.math.conj(r)*r),dtype=tf.float32)
+    rTr     =   tf.math.real( tf.reduce_sum(tf.math.conj(r)*r) )
     loopVar =   i,rTr,x,r,p
     out     =   tf.while_loop(cond,body,loopVar,name='CGwhile',parallel_iterations=1)[2]
     return c2r(out)
@@ -65,7 +68,7 @@ def myCG(A,rhs):
 class myDC(Layer):
 
     def __init__(self, **kwargs):
-        super(myDC, self).__init__(**kwargs)        
+        super(myDC, self).__init__(**kwargs)
         self.lam1 = self.add_weight(name='lam1', shape=(1,), initializer=tf.constant_initializer(value=0.03),
                                      dtype='float32', trainable=True)
         self.lam2 = self.add_weight(name='lam2', shape=(1,), initializer=tf.constant_initializer(value=0.03),
@@ -83,7 +86,7 @@ class myDC(Layer):
             Aobj = Aclass(c, m, lam3)
             y = myCG(Aobj, r)
             return y
-        
+
         inp = (csm, mask, rhs)
         # Mapping functions with multi-arity inputs and outputs
         rec = tf.map_fn(fn, inp, dtype=tf.float32, name='mapFn')
@@ -122,57 +125,56 @@ def create_recon(nx, ny, nc, nLayers, num_block, num_filters = 64):
 
     # define the inputs
     input_c     =   Input(shape=(nc,nx,ny), dtype = tf.complex64,   name = 'input_c')
-    input_m1    =   Input(shape=(nx,ny),    dtype = tf.complex64,   name = 'input_m1')    
-    input_m2    =   Input(shape=(nx,ny),    dtype = tf.complex64,   name = 'input_m2')    
-    input_k1    =   Input(shape=(nc,nx,ny), dtype = tf.complex64,   name = 'input_k1') 
-    input_k2    =   Input(shape=(nc,nx,ny), dtype = tf.complex64,   name = 'input_k2') 
- 
+    input_m1    =   Input(shape=(nx,ny),    dtype = tf.complex64,   name = 'input_m1')
+    input_m2    =   Input(shape=(nx,ny),    dtype = tf.complex64,   name = 'input_m2')
+    input_k1    =   Input(shape=(nc,nx,ny), dtype = tf.complex64,   name = 'input_k1')
+    input_k2    =   Input(shape=(nc,nx,ny), dtype = tf.complex64,   name = 'input_k2')
+
     # define functions
     UpdateDC    =   myDC()
-    rmbg        =   rm_bg()    
+    rmbg        =   rm_bg()
     calc_Aty    =   Aty()
     myFFT       =   tfft2()
-    myIFFT      =   tifft2()    
+    myIFFT      =   tifft2()
 
     # calc Atb
     Atb1        =   calc_Aty([input_k1,input_c,input_m1])
     Atb2        =   calc_Aty([input_k2,input_c,input_m2])
-    
+
     # calc init
     dc1         =   c2r(Atb1)
     dc2         =   c2r(Atb2)
-    
+
     # define networks
     RegConv_k   =   RegConvLayers(nx,ny,4,nLayers,num_filters)
     RegConv_i   =   RegConvLayers(nx,ny,4,nLayers,num_filters)
-   
-    # loop    
-    for blk in range(0,num_block):          
-        # concat shots with VC             
-        dc_cat_i    = Concatenate(axis=-1)([dc1,dc2,tf.math.conj(dc1),tf.math.conj(dc2)])
-        dc_cat_k    = Concatenate(axis=-1)([myFFT([dc1]),myFFT([dc2]),myFFT([tf.math.conj(dc1)]),myFFT([tf.math.conj(dc2)])])             
+
+    # loop
+    for blk in range(0,num_block):
+        # concat shots with VC
+        dc_cat_i    = Concatenate(axis=-1)([dc1,dc2,tconj(dc1),tconj(dc2)])
+        dc_cat_k    = Concatenate(axis=-1)([myFFT([dc1]),myFFT([dc2]),myFFT([tf.math.conj(dc1)]),myFFT([tf.math.conj(dc2)])])
         # CNN Regularization
         rg_term_i   = RegConv_i(dc_cat_i)
-        rg_term_k   = RegConv_k(dc_cat_k)    
-        # separate shots        
-        irg1        = (rg_term_i[:,:,:,0:2] + tf.math.conj(rg_term_i[:,:,:,4:6]))/2
-        irg2        = (rg_term_i[:,:,:,2:4] + tf.math.conj(rg_term_i[:,:,:,6:8]))/2
-        krg1        = (myIFFT([rg_term_k[:,:,:,0:2]]) + tf.math.conj(myIFFT([rg_term_k[:,:,:,4:6]])))/2
-        krg2        = (myIFFT([rg_term_k[:,:,:,2:4]]) + tf.math.conj(myIFFT([rg_term_k[:,:,:,6:8]])))/2
+        rg_term_k   = RegConv_k(dc_cat_k)
+        # separate shots
+        irg1        = (rg_term_i[:,:,:,0:2] + tconj(rg_term_i[:,:,:,4:6]))/2
+        irg2        = (rg_term_i[:,:,:,2:4] + tconj(rg_term_i[:,:,:,6:8]))/2
+        krg1        = (myIFFT([rg_term_k[:,:,:,0:2]]) + tconj(myIFFT([rg_term_k[:,:,:,4:6]])))/2
+        krg2        = (myIFFT([rg_term_k[:,:,:,2:4]]) + tconj(myIFFT([rg_term_k[:,:,:,6:8]])))/2
         rg1         = UpdateDC.lam_weight([irg1,krg1])
-        rg2         = UpdateDC.lam_weight([irg2,krg2])        
+        rg2         = UpdateDC.lam_weight([irg2,krg2])
         # AtA update
         rg1         = Add()([c2r(Atb1), rg1])
-        rg2         = Add()([c2r(Atb2), rg2])         
+        rg2         = Add()([c2r(Atb2), rg2])
         # Update DC
-        dc1         = UpdateDC([rg1, input_c, input_m1])      
-        dc2         = UpdateDC([rg2, input_c, input_m2])      
-    
-    # remove background                
-    out1 = rmbg([dc1,input_c])   
-    out2 = rmbg([dc2,input_c])     
+        dc1         = UpdateDC([rg1, c2r(input_c), c2r(input_m1)])
+        dc2         = UpdateDC([rg2, c2r(input_c), c2r(input_m2)])
+
+    # remove background
+    out1 = rmbg([dc1,input_c])
+    out2 = rmbg([dc2,input_c])
 
     return Model(inputs     =   [ input_c, input_m1, input_m2, input_k1, input_k2],
                  outputs    =   [ out1, out2],
                  name       =   'RECON' )
-
