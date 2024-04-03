@@ -20,6 +20,7 @@ from tensorflow.keras.models import Model
 
 c2r=Lambda(lambda x:tf.stack([tf.math.real(x),tf.math.imag(x)],axis=-1))
 r2c=Lambda(lambda x:tf.complex(x[...,0],x[...,1]))
+tconj=Lambda(lambda x:c2r(tf.math.conj(r2c(x))))
 
 class tfft2(Layer):
     def __init__(self, **kwargs):
