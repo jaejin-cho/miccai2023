@@ -3,14 +3,10 @@
 # import libraries
 ##########################################################
 
-import numpy                as  np
-import tensorflow           as  tf
-
-# keras
-from tensorflow.keras import backend as K
-from tensorflow.keras import Input
-from tensorflow.keras.layers import Layer, Concatenate
-from tensorflow.keras.models import Model
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 from library_net_function  import *
 from library_net_recon     import create_recon
@@ -20,27 +16,22 @@ from library_net_recon     import create_recon
 # forward model
 ##########################################################
 
-class pForward(Layer):
-    def __init__(self, **kwargs):
-        super(pForward, self).__init__(**kwargs)
+class pForward(nn.Module):
+    def __init__(self):
+        super(pForward, self).__init__()
 
-    def build(self, input_shape):
-        super(pForward, self).build(input_shape)
+    def forward(self, x):
+        o1, c1, m1 = x
 
-    def call(self, x):
-        o1,c1,m1    =  x
-        
-        def forward1(tmp):      
-            o2,c2,m2    =   tmp       
-            nx, ny      =   c2.shape[1:3]
-            CI          =   c2 * tf.expand_dims(o2,axis=0)     
-            kspace      =   tf.signal.fftshift(tf.signal.fft2d(tf.signal.fftshift(CI,axes=(1,2))),axes=(1,2)) # / tf.math.sqrt(tf.cast(nx*ny,tf.complex64))
-            masked      =   kspace*tf.expand_dims(m2,axis=0)    
-            return masked   
+        def forward1(tmp):
+            o2, c2, m2 = tmp
+            CI = c2 * o2.unsqueeze(0)
+            kspace = torch.fft.fftshift(torch.fft.fft2(torch.fft.fftshift(CI, dim=(-2, -1))), dim=(-2, -1))
+            masked = kspace * m2.unsqueeze(0)
+            return masked
 
-        inp1 = (o1[...,0],c1,m1)
-        rec = tf.map_fn(forward1, inp1, dtype=tf.complex64)
-
+        inp1 = (o1[..., 0], c1, m1)
+        rec = torch.stack([forward1(t) for t in zip(*inp1)])
         return rec
 
 ##########################################################
@@ -48,48 +39,42 @@ class pForward(Layer):
 # network
 ##########################################################
     
-def create_zero_MIRID_model(nx, ny, nc, nLayers, num_block, num_filters = 64):
+class ZeroMIRIDModel(nn.Module):
+    def __init__(self, nx, ny, nLayers, num_block, num_filters=64):
+        super(ZeroMIRIDModel, self).__init__()
+        self.recon_joint    =   create_recon(nx=nx, ny=ny, num_block=num_block, nLayers=nLayers, num_filters=num_filters)
+        self.oForward       =   pForward()
 
-    # define the inputs    
-    input_c         = Input(shape=(nc,nx,ny),   dtype = tf.complex64,       name = 'input_c')
-    input_k_trn1    = Input(shape=(nc,nx,ny),   dtype = tf.complex64,       name = 'input_k_trn1') 
-    input_k_trn2    = Input(shape=(nc,nx,ny),   dtype = tf.complex64,       name = 'input_k_trn2') 
-    input_k_lss1    = Input(shape=(nc,nx,ny),   dtype = tf.complex64,       name = 'input_k_lss1') 
-    input_k_lss2    = Input(shape=(nc,nx,ny),   dtype = tf.complex64,       name = 'input_k_lss2') 
-    input_m_trn1    = Input(shape=(nx,ny),      dtype = tf.complex64,       name = 'input_m_trn1') 
-    input_m_trn2    = Input(shape=(nx,ny),      dtype = tf.complex64,       name = 'input_m_trn2') 
-    input_m_lss1    = Input(shape=(nx,ny),      dtype = tf.complex64,       name = 'input_m_lss1') 
-    input_m_lss2    = Input(shape=(nx,ny),      dtype = tf.complex64,       name = 'input_m_lss2') 
+    def forward(self, inputs):
+        input_c, input_k_trn1, input_k_trn2, input_k_lss1, input_k_lss2, input_m_trn1, input_m_trn2, input_m_lss1, input_m_lss2 = inputs
 
-    recon_joint     =   create_recon(nx = nx, ny = ny, nc = nc, num_block = num_block,  nLayers = nLayers, num_filters=   num_filters)
-                                           
-    # functions and variables
-    oForward    =   pForward()
+        out1, out2 = self.recon_joint([input_c, input_m_trn1, input_m_trn2, input_k_trn1, input_k_trn2])
+        out3 = r2c(out1).unsqueeze(-1)
+        out4 = r2c(out2).unsqueeze(-1)
 
-    # Joint Recon
-    [out1,out2] =   recon_joint([input_c, input_m_trn1, input_m_trn2, input_k_trn1, input_k_trn2])    
-    out3        =   K.expand_dims(r2c(out1),axis=-1)
-    out4        =   K.expand_dims(r2c(out2),axis=-1)
+        lss_1st = self.oForward([out3, input_c, input_m_lss1 + input_m_trn1])
+        lss_2nd = self.oForward([out4, input_c, input_m_lss2 + input_m_trn2])
 
-    # loss points in k-space
-    lss_1st     =   oForward([out3,   input_c,    input_m_lss1+input_m_trn1]) # we might want input_m_lss1+input_m_trn1
-    lss_2nd     =   oForward([out4,   input_c,    input_m_lss2+input_m_trn2])
+        lss_l1 = torch.sum(torch.abs(lss_1st - input_k_lss1 - input_k_trn1), dim=1) / (
+            torch.sum(torch.abs(input_k_lss1 + input_k_trn1)) + torch.sum(torch.abs(input_k_lss2 + input_k_trn2))
+        ) + torch.sum(torch.abs(lss_2nd - input_k_lss2 - input_k_trn2), dim=1) / (
+            torch.sum(torch.abs(input_k_lss1 + input_k_trn1)) + torch.sum(torch.abs(input_k_lss2 + input_k_trn2))
+        )
 
-    lss_l1      =   K.sum(K.abs(lss_1st - input_k_lss1 - input_k_trn1),axis=1) / (K.sum(K.abs(input_k_lss1+input_k_trn1))+K.sum(K.abs(input_k_lss2+input_k_trn2)))   \
-                  + K.sum(K.abs(lss_2nd - input_k_lss2 - input_k_trn2),axis=1) / (K.sum(K.abs(input_k_lss1+input_k_trn1))+K.sum(K.abs(input_k_lss2+input_k_trn2)))  
-    lss_l2      =   K.sum(K.square(K.abs(lss_1st - input_k_lss1 - input_k_trn1)),axis=1) / K.sqrt(K.sum(K.square(K.abs(input_k_lss1+input_k_trn1))+K.square(K.abs(input_k_lss2+input_k_trn2))))   \
-                  + K.sum(K.square(K.abs(lss_2nd - input_k_lss2 - input_k_trn2)),axis=1) / K.sqrt(K.sum(K.square(K.abs(input_k_lss1+input_k_trn1))+K.square(K.abs(input_k_lss2+input_k_trn2))))   
-        
-    # outputs
-    out_final   =   Concatenate(axis=-1)([  out3,   out4,   \
-                                            K.cast(K.expand_dims(lss_l1,axis=-1),tf.complex64),          \
-                                            K.cast(K.expand_dims(lss_l2,axis=-1),tf.complex64),          \
-                                          ])   
-    
-    return Model(inputs     =   [ input_c,  input_k_trn1,   input_k_trn2,   input_k_lss1,   input_k_lss2,    
-                                            input_m_trn1,   input_m_trn2,   input_m_lss1,   input_m_lss2    ],
-                 outputs    =   [ out_final  ],
-                 name       =   'zero-MIRID' )
+        lss_l2 = torch.sum(torch.square(torch.abs(lss_1st - input_k_lss1 - input_k_trn1)), dim=1) / torch.sqrt(
+            torch.sum(torch.square(torch.abs(input_k_lss1 + input_k_trn1)) + torch.square(torch.abs(input_k_lss2 + input_k_trn2)))
+        ) + torch.sum(torch.square(torch.abs(lss_2nd - input_k_lss2 - input_k_trn2)), dim=1) / torch.sqrt(
+            torch.sum(torch.square(torch.abs(input_k_lss1 + input_k_trn1)) + torch.square(torch.abs(input_k_lss2 + input_k_trn2)))
+        )
+
+        out_final = torch.cat([
+            out3, out4,
+            lss_l1.unsqueeze(-1).to(torch.complex64),
+            lss_l2.unsqueeze(-1).to(torch.complex64)
+        ], dim=-1)
+
+        return out_final
+
 
 
 ##########################################################
@@ -97,12 +82,12 @@ def create_zero_MIRID_model(nx, ny, nc, nLayers, num_block, num_filters = 64):
 # custom loss
 ##########################################################
 
-def loss_custom_v1(y_true, y_pred):
-    
-    # l1 norm
-    l1      =   K.sum(K.abs(y_pred[...,-2]))  
-    # l2 norm
-    l2      =   K.sqrt(K.sum(K.abs(y_pred[...,-1]))) 
+def loss_custom_v1(y_pred):
+    # L1 norm
+    l1 = torch.sum(torch.abs(y_pred[..., -2]))
+    # L2 norm
+    l2 = torch.sqrt(torch.sum(torch.abs(y_pred[..., -1])))
 
-    return ( l1 + l2 )  
+    return l1 + l2
+
 
